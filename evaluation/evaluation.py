@@ -1,0 +1,338 @@
+"""
+AI Detection Benchmark Evaluator
+
+This script evaluates the performance of an AI text detection model across different domains
+and attack types, using standard metrics such as precision, recall, and F1-score.
+"""
+
+import argparse
+import datasets
+import json
+import os
+import re
+from datasets import load_dataset
+from huggingface_hub import login
+from tqdm import tqdm
+from typing import Dict, List, Tuple, Optional, Union
+
+from utils import gen_answer, load_model_tokenizer
+
+
+def parse_arguments() -> argparse.Namespace:
+    
+    parser = argparse.ArgumentParser(description="Evaluation of AI detection models across domains and attack types")
+    
+    parser.add_argument("--model_path", type=str, required=True,
+                        help="Hugging Face model path to use")
+    
+    parser.add_argument("--setting", type=str, default="setting_1",
+                        help="Evaluation setting (default: setting_1)")
+    
+    parser.add_argument("--domains", nargs='+', 
+                        default=["wiki", "reddit", "abstracts", "recipes"],
+                        help="Domains to evaluate (default: all)")
+    
+    parser.add_argument("--attacks", nargs='+',
+                        default=["none", "paraphrase", "insert_paragraphs", "homoglyph", 
+                                "whitespace", "synonym", "article_deletion",
+                                "alternative_spelling", "perplexity_misspelling", 
+                                "upper_lower", "number"],
+                        help="Attack types to evaluate (default: all)")
+    
+    parser.add_argument("--threshold", type=float, default=0.5,
+                        help="Decision threshold for the model (default: 0.5)")
+    
+    parser.add_argument("--dataset_samples", type=int, default=150,
+                        help="Number of samples per domain (default: 150)")
+    
+    parser.add_argument("--results_dir", type=str, default="results",
+                        help="Directory to save results (default: results)")
+    
+    return parser.parse_args()
+
+
+
+def load_benchmark(dataset_path: str, domain: str, attack: str, setting: str, n_samples: int) -> datasets.Dataset:
+    """
+    Load the test benchmark for a specific domain and attack type.
+
+    Args:
+        dataset_path (str): Base dataset path
+        domain (str): Domain to filter (wiki, reddit, abstracts, recipes)
+        attack (str): Attack type to filter
+        setting (str): Evaluation setting
+        n_samples (int): Number of samples to select for each category
+
+    Returns:
+        datasets.Dataset: Filtered dataset containing human and AI examples
+    """
+    test_set = load_dataset(f'MarcoMurgia97/test_set_{setting}')['test']
+    
+    # Filter human examples
+    test_set_human = test_set.filter(lambda example: example["model"] == 'human')
+    test_set_human = test_set_human.filter(
+        lambda example: example['domain'] == domain and example['attack'] == attack
+    )
+    test_set_human = test_set_human.select(range(0, n_samples))
+    
+    # Filter AI examples
+    test_set_ai = test_set.filter(lambda example: example["model"] != 'human')
+    test_set_ai = test_set_ai.filter(
+        lambda example: example['domain'] == domain and example['attack'] == attack
+    )
+    test_set_ai = test_set_ai.select(range(0, n_samples))
+    
+    # Merge datasets
+    return datasets.concatenate_datasets([test_set_human, test_set_ai])
+
+
+def load_data(file_path: str) -> Dict:
+    """
+    Args:
+        file_path (str): Path of the JSON file to load
+
+    Returns:
+        Dict: Dictionary with loaded data, or empty dictionary in case of error
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8') as file:
+            return json.load(file)
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        print(f'Error loading file: {e}')
+        return {}
+
+
+def preprocess_text(text: str, attack_type: str) -> str:
+    """
+    Preprocess text based on attack type.
+
+    Args:
+        text (str): Text to preprocess
+        attack_type (str): Attack type applied to the text
+
+    Returns:
+        str: Preprocessed text
+    """
+    if attack_type == 'whitespace':
+        # Remove tabs, newlines and other special whitespace characters
+        text = re.sub(r'[\t\n\r\f\v]', ' ', text)
+    elif attack_type == 'insert_paragraphs':
+        # Replace single newlines with spaces
+        text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)
+    else:
+        # Normalize all multiple spaces to single spaces
+        text = re.sub(r'\s+', ' ', text)
+    
+    return text.strip()
+
+
+def create_prompt(text: str) -> str:
+    """
+    Create a prompt for the AI detection model.
+
+    Args:
+        text (str): Text to analyze
+
+    Returns:
+        str: Formatted prompt
+    """
+    return f"""Given the following text:
+    
+    "{text}"
+
+    Analyze the text and determine if it was written by a human or generated by a large language model.
+    Answer ONLY with "human" or "machine", without any additional comments."""
+
+
+def evaluate_model(
+    model_path: str, 
+    domains: List[str], 
+    attacks: List[str], 
+    threshold: float, 
+    n_samples: int, 
+    dataset_path: Optional[str], 
+    setting: str, 
+    results_dir: str
+) -> None:
+    """
+    Evaluate the model across different domains and attack types.
+
+    Args:
+        model_path (str): Path of the model to evaluate
+        domains (List[str]): Domains to evaluate
+        attacks (List[str]): Attack types to evaluate
+        threshold (float): Decision threshold for the model
+        n_samples (int): Number of samples per category
+        dataset_path (str, optional): Test dataset path
+        setting (str): Evaluation setting
+        results_dir (str): Directory to save results
+    """
+    model, tokenizer = load_model_tokenizer(model_path)
+    
+    model_name = model_path.replace('MarcoMurgia97', '')
+    th_file = str(threshold * 100).replace('.', '_')
+    
+    os.makedirs(os.path.join(results_dir, setting), exist_ok=True)
+    
+    results_path = os.path.join(
+        results_dir, 
+        setting, 
+        f"results_{model_name}_{n_samples}sample_th_{th_file}.json"
+    )
+    
+    results_dict = load_data(results_path)
+    
+    for domain in domains:
+        for attack in attacks:
+            key = f'{setting}_attack_{attack}_{domain}'
+            
+            if key in results_dict:
+                continue
+                
+            print(f"\n--- Evaluating domain: {domain}, attack: {attack} ---")
+            
+            benchmark_dataset = load_benchmark(dataset_path, domain, attack, setting, n_samples)
+            
+            TP, FP, TN, FN = 0, 0, 0, 0
+            TP_sampling, TP_greedy = 0, 0
+            FN_sampling, FN_greedy = 0, 0
+            human_sample_counter = 0
+            
+            for example in tqdm(benchmark_dataset):
+                text = example['generation']
+                text = preprocess_text(text, attack)
+                
+                if example['model'] == 'human':
+                    human_sample_counter += 1
+                
+                prompt = create_prompt(text)
+                
+                answer = gen_answer(model, tokenizer, prompt, threshold)
+                
+                
+                # Evaluate response
+                is_machine_prediction = 'machine' in answer.lower()
+                is_machine_truth = example['model'] != 'human'
+                
+                if is_machine_prediction and is_machine_truth:
+                    TP += 1
+                    if example['decoding'] == 'sampling':
+                        TP_sampling += 1
+                    else:
+                        TP_greedy += 1
+                elif not is_machine_prediction and is_machine_truth:
+                    FN += 1
+                    if example['decoding'] == 'sampling':
+                        FN_sampling += 1
+                    else:
+                        FN_greedy += 1
+                elif is_machine_prediction and not is_machine_truth:
+                    FP += 1
+                else:
+                    TN += 1
+            
+            metrics = calculate_metrics(TP, FP, TN, FN, TP_greedy, FN_greedy, TP_sampling, FN_sampling, human_sample_counter)
+            
+            results_dict[key] = {
+                'recall': round(metrics['recall'] * 100, 4),
+                'recall_greedy': round(metrics['recall_greedy'] * 100, 4),
+                'recall_sampling': round(metrics['recall_sampling'] * 100, 4),
+                'precision': round(metrics['precision'] * 100, 4),
+                'accuracy': round(metrics['accuracy'] * 100, 4),
+                'f1_score': round(metrics['f1_score'] * 100, 4),
+                'FPR': round(metrics['FPR'] * 100, 4),
+                'TP': TP,
+                'FP': FP,
+                'TN': TN,
+                'FN': FN,
+                'th': threshold
+            }
+            
+            with open(results_path, 'w', encoding='utf-8') as f:
+                json.dump(results_dict, f, indent=2, ensure_ascii=False)
+
+
+def calculate_metrics(
+    TP: int, FP: int, TN: int, FN: int, 
+    TP_greedy: int, FN_greedy: int, 
+    TP_sampling: int, FN_sampling: int,
+    human_sample_counter: int
+) -> Dict[str, float]:
+    """
+    Calculate model evaluation metrics.
+
+    Args:
+        TP (int): True Positive
+        FP (int): False Positive
+        TN (int): True Negative
+        FN (int): False Negative
+        TP_greedy (int): True Positive for greedy sampling
+        FN_greedy (int): False Negative for greedy sampling
+        TP_sampling (int): True Positive for sampling
+        FN_sampling (int): False Negative for sampling
+        human_sample_counter (int): Total number of human examples
+
+    Returns:
+        Dict[str, float]: Dictionary containing all calculated metrics
+    """
+    if TP + FN != 0:
+        recall = TP / (TP + FN)
+    else:
+        recall = 0.0
+        
+    if TP_greedy + FN_greedy != 0:
+        recall_greedy = TP_greedy / (TP_greedy + FN_greedy)
+    else:
+        recall_greedy = 0.0
+        
+    if TP_sampling + FN_sampling != 0:
+        recall_sampling = TP_sampling / (TP_sampling + FN_sampling)
+    else:
+        recall_sampling = 0.0
+    
+    if TP + FP != 0:
+        precision = TP / (TP + FP)
+    else:
+        precision = 0.0
+    
+    if precision != 0.0 or recall != 0.0:
+        f1_score = 2 * (precision * recall) / (precision + recall)
+    else:
+        f1_score = 0.0
+    
+    accuracy = (TP + TN) / (TP + TN + FP + FN) if (TP + TN + FP + FN) > 0 else 0.0
+    
+    FPR = FP / human_sample_counter if human_sample_counter > 0 else 0.0
+    
+    return {
+        'recall': recall,
+        'recall_greedy': recall_greedy,
+        'recall_sampling': recall_sampling,
+        'precision': precision,
+        'accuracy': accuracy,
+        'f1_score': f1_score,
+        'FPR': FPR
+    }
+
+
+def main():
+    
+    args = parse_arguments()
+        
+    # Run evaluation
+    evaluate_model(
+        model_path=args.model_path,
+        domains=args.domains,
+        attacks=args.attacks,
+        threshold=args.threshold,
+        n_samples=args.dataset_samples,
+        dataset_path=args.dataset_path,
+        setting=args.setting,
+        results_dir=args.results_dir
+    )
+
+
+if __name__ == "__main__":
+    main()

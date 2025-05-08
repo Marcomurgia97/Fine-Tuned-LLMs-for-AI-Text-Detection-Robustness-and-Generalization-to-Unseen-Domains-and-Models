@@ -1,0 +1,14 @@
+{
+  "results_validation": {
+    "recall": 70.61,
+    "precision": 93.85,
+    "accuracy": 82.99,
+    "f1_score": 80.58,
+    "FPR": 4.63,
+    "TP": 5825,
+    "FP": 382,
+    "TN": 7868,
+    "FN": 2425,
+    "th": 0.07096773386001587
+  }
+}
