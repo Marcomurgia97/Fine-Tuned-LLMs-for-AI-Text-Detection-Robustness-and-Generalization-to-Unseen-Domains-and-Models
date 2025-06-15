@@ -52,13 +52,7 @@ In the script the test set used in the experiments described in the paper is use
 **Models**
 *   **[Llama3.1-8b-SingleDomain](https://huggingface.co/MarcoMurgia97/Llama3.1-8b_SingleDomain)** - SFT training on one domain (abstracts)
 *   **[Llama3.1-8b-DualDomain](https://huggingface.co/MarcoMurgia97/Llama3.1-8b_DualDomain)** - SFT training on two domains (abstracts and reddit)
-
-**RAID subset**
-*   **[Subset](https://huggingface.co/datasets/MarcoMurgia97/raid_training_set)** 
-
-**Threshold Optimization Set**
-*   **[Threshold Optimization Set](https://huggingface.co/datasets/MarcoMurgia97/Threshold_Optimization_Set)** 
-
+ 
 **Test Set**
 *   **[Test set](https://huggingface.co/datasets/MarcoMurgia97/test_set_setting_3)** 
 
